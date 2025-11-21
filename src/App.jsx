@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
     User, Brain, Layout, Server, Calendar, CheckCircle,
     AlertCircle, Terminal, Share2, Trophy, Save,
@@ -10,7 +10,7 @@ import {
 import { initializeApp } from "firebase/app";
 import { getFirestore, doc, onSnapshot, setDoc } from "firebase/firestore";
 
-// --- 🛠️ НАСТРОЙКИ (ВСТАВЬ СВОИ КЛЮЧИ НИЖЕ) ---
+// --- 🛠️ НАСТРОЙКИ ---
 const firebaseConfig = {
     apiKey: "AIzaSyAHqP6W8w4dnV7TuG0ryXIzCLGQstO89o0",
     authDomain: "forte-dashboard.firebaseapp.com",
@@ -21,15 +21,22 @@ const firebaseConfig = {
     measurementId: "G-1FLR1SPQX3"
 };
 
-// Инициализация Firebase
-let db;
+// Инициализация Firebase с защитой от ошибок
+let db = null;
 try {
-    if (firebaseConfig.apiKey !== "ВСТАВЬ_СЮДА_API_KEY") {
+    // Проверяем, что пользователь действительно заменил дефолтный текст на ключи
+    const isConfigured = firebaseConfig.apiKey && firebaseConfig.apiKey !== "ВСТАВЬ_СЮДА_API_KEY" && !firebaseConfig.apiKey.includes("ВСТАВЬ");
+
+    if (isConfigured) {
         const app = initializeApp(firebaseConfig);
         db = getFirestore(app);
+        console.log("✅ Firebase initialized successfully");
+    } else {
+        console.log("⚠️ Firebase keys not found. Running in Local Mode.");
     }
 } catch (e) {
-    console.error("Firebase init error:", e);
+    console.error("❌ Firebase init error:", e);
+    db = null; // Откат к локальному режиму при ошибке
 }
 
 // --- КОНСТАНТЫ ---
@@ -179,41 +186,65 @@ const CountdownTimer = () => {
 const App = () => {
     const [activeTab, setActiveTab] = useState('roles');
     const [selectedDay, setSelectedDay] = useState(1);
-    const [rolesData, setRolesData] = useState(INITIAL_ROLES);
-    const [sharedNotes, setSharedNotes] = useState("");
-    const [isOnline, setIsOnline] = useState(false);
-    const [isConfigured, setIsConfigured] = useState(false);
 
-    // Синхронизация
-    useEffect(() => {
-        if (!db) {
+    // Состояние (инициализируем лениво из LocalStorage, чтобы данные были сразу)
+    const [rolesData, setRolesData] = useState(() => {
+        try {
             const saved = localStorage.getItem('forteHackathonProgress');
-            if (saved) setRolesData(JSON.parse(saved));
-            const savedNotes = localStorage.getItem('forteHackathonNotes');
-            if (savedNotes) setSharedNotes(savedNotes);
-            return;
+            return saved ? JSON.parse(saved) : INITIAL_ROLES;
+        } catch (e) {
+            console.error("Error parsing initial local storage:", e);
+            return INITIAL_ROLES;
         }
+    });
 
-        setIsConfigured(true);
+    const [sharedNotes, setSharedNotes] = useState(() => {
+        return localStorage.getItem('forteHackathonNotes') || "";
+    });
+
+    const [isOnline, setIsOnline] = useState(false);
+
+    // --- EFEFCT: СИНХРОНИЗАЦИЯ (CLOUD + LOCAL) ---
+    useEffect(() => {
+        // 1. Всегда сохраняем в LocalStorage при любом изменении стейта (БЭКАП)
+        localStorage.setItem('forteHackathonProgress', JSON.stringify(rolesData));
+        localStorage.setItem('forteHackathonNotes', sharedNotes);
+    }, [rolesData, sharedNotes]);
+
+    useEffect(() => {
+        // 2. Если Firebase не настроен — выходим
+        if (!db) return;
+
+        // 3. Подписываемся на обновления из облака
         const unsub = onSnapshot(doc(db, "hackathon", "progress"), (docSnapshot) => {
             if (docSnapshot.exists()) {
                 const data = docSnapshot.data();
-                setRolesData(data.roles || INITIAL_ROLES);
-                setSharedNotes(data.notes || "");
+                // Пришли новые данные из облака — обновляем стейт
+                // (это автоматически триггернет useEffect выше и сохранит в LocalStorage)
+                if (data.roles) setRolesData(data.roles);
+                if (data.notes !== undefined) setSharedNotes(data.notes);
                 setIsOnline(true);
             } else {
-                setDoc(doc(db, "hackathon", "progress"), { roles: INITIAL_ROLES, notes: "" });
+                // Документа нет? Создаем (используя текущие локальные данные)
+                setDoc(doc(db, "hackathon", "progress"), {
+                    roles: rolesData,
+                    notes: sharedNotes
+                }).catch(e => console.error("Init doc error:", e));
             }
         }, (error) => {
-            console.error("Sync error:", error);
+            console.error("Sync error (likely permission or network):", error);
             setIsOnline(false);
         });
 
         return () => unsub();
-    }, []);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []); // Запускаем один раз при старте
 
-    // Сохранение задач
+
+    // --- ЛОГИКА ИЗМЕНЕНИЙ ---
+
     const toggleTask = async (roleId, taskId) => {
+        // 1. Сначала меняем локальный стейт (мгновенная реакция интерфейса)
         const newData = rolesData.map(role => {
             if (role.id !== roleId) return role;
             return {
@@ -223,44 +254,49 @@ const App = () => {
                 )
             };
         });
+
         setRolesData(newData);
 
+        // 2. Пытаемся отправить в облако (если подключено)
         if (db) {
-            await setDoc(doc(db, "hackathon", "progress"), { roles: newData }, { merge: true });
-        } else {
-            localStorage.setItem('forteHackathonProgress', JSON.stringify(newData));
+            try {
+                await setDoc(doc(db, "hackathon", "progress"), { roles: newData }, { merge: true });
+            } catch (e) {
+                console.error("Cloud save failed, but local saved OK:", e);
+                setIsOnline(false);
+            }
         }
     };
 
-    // Сохранение заметок (Debounced manual save not needed, just onBlur or onChange throttled)
-    const handleNotesChange = async (e) => {
-        const text = e.target.value;
-        setSharedNotes(text); // Optimistic UI
+    const handleNotesChange = (e) => {
+        setSharedNotes(e.target.value);
     };
 
     const saveNotesToDb = async () => {
         if (db) {
-            await setDoc(doc(db, "hackathon", "progress"), { notes: sharedNotes }, { merge: true });
-        } else {
-            localStorage.setItem('forteHackathonNotes', sharedNotes);
+            try {
+                await setDoc(doc(db, "hackathon", "progress"), { notes: sharedNotes }, { merge: true });
+            } catch (e) {
+                console.error("Notes cloud save failed:", e);
+            }
         }
-    }
+    };
 
-    // Reset Logic
     const resetProgress = async () => {
-        if(confirm("⚠️ Сбросить ВЕСЬ командный прогресс?")) {
+        if(confirm("⚠️ Сбросить ВЕСЬ прогресс (локально и в облаке)?")) {
             const emptyData = INITIAL_ROLES;
             setRolesData(emptyData);
             setSharedNotes("");
+
             if(db) {
-                await setDoc(doc(db, "hackathon", "progress"), { roles: emptyData, notes: "" });
-            } else {
-                localStorage.setItem('forteHackathonProgress', JSON.stringify(emptyData));
-                localStorage.setItem('forteHackathonNotes', "");
+                try {
+                    await setDoc(doc(db, "hackathon", "progress"), { roles: emptyData, notes: "" });
+                } catch(e) { console.error("Cloud reset failed:", e); }
             }
         }
     }
 
+    // Подсчет статистики
     const totalTasks = rolesData.reduce((acc, r) => acc + r.tasks.length, 0);
     const completedTasks = rolesData.reduce((acc, r) => acc + r.tasks.filter(t => t.completed).length, 0);
     const totalPercent = Math.round((completedTasks / totalTasks) * 100) || 0;
@@ -275,8 +311,6 @@ const App = () => {
 
                 {/* --- HEADER --- */}
                 <div className="flex flex-col lg:flex-row justify-between items-center gap-6 bg-slate-900/40 p-6 rounded-2xl border border-slate-800/60 backdrop-blur-md shadow-2xl relative overflow-hidden group">
-                    {/* Background Glow */}
-                    <div className="absolute -top-20 -left-20 w-64 h-64 bg-blue-500/10 rounded-full blur-[80px] group-hover:bg-blue-500/20 transition-all duration-1000"></div>
 
                     <div className="relative z-10 text-center lg:text-left">
                         <h1 className="text-3xl md:text-5xl font-black tracking-tight text-white mb-2 flex items-center justify-center lg:justify-start gap-3">
@@ -286,14 +320,14 @@ const App = () => {
               <span className="bg-slate-800/80 text-slate-300 text-xs font-mono px-3 py-1 rounded border border-slate-700">
                 TASK_04: BUSINESS_ANALYST
               </span>
-                            {isConfigured ? (
+                            {db ? (
                                 <span className={`flex items-center text-xs px-2 py-1 rounded border transition-colors ${isOnline ? 'bg-green-500/10 text-green-400 border-green-500/20' : 'bg-red-500/10 text-red-400 border-red-500/20'}`}>
                    {isOnline ? <Wifi className="w-3 h-3 mr-1.5 animate-pulse" /> : <WifiOff className="w-3 h-3 mr-1.5" />}
-                                    {isOnline ? 'LIVE SYNC' : 'OFFLINE'}
+                                    {isOnline ? 'LIVE SYNC' : 'OFFLINE MODE'}
                  </span>
                             ) : (
                                 <span className="flex items-center text-xs px-2 py-1 rounded border bg-orange-500/10 text-orange-400 border-orange-500/20">
-                   <AlertCircle className="w-3 h-3 mr-1.5" /> Local Mode
+                   <AlertCircle className="w-3 h-3 mr-1.5" /> LOCAL STORAGE
                  </span>
                             )}
                         </div>
@@ -308,7 +342,6 @@ const App = () => {
                                 <span className={totalPercent === 100 ? "text-green-400 drop-shadow-[0_0_8px_rgba(74,222,128,0.5)]" : "text-blue-400"}>{totalPercent}%</span>
                             </div>
                             <div className="h-3 bg-slate-900 rounded-full overflow-hidden border border-slate-800 relative">
-                                {/* Progress Bar stripes */}
                                 <div className={`absolute inset-0 bg-[url('https://www.transparenttextures.com/patterns/diagonal-stripes.png')] opacity-20 z-10 w-full h-full`}></div>
                                 <div
                                     className={`h-full rounded-full transition-all duration-1000 relative z-0 ${totalPercent === 100 ? 'bg-gradient-to-r from-green-400 to-emerald-600 shadow-[0_0_15px_rgba(16,185,129,0.6)]' : 'bg-gradient-to-r from-blue-600 via-purple-600 to-pink-600'}`}
@@ -344,13 +377,11 @@ const App = () => {
 
                     <div className="flex items-center gap-3">
                         <button onClick={resetProgress} className="text-xs text-slate-600 hover:text-red-400 flex items-center px-3 py-2 transition-colors hover:bg-red-950/10 rounded">
-                            <RefreshCw className="w-3 h-3 mr-1.5" /> Reset All
+                            <RefreshCw className="w-3 h-3 mr-1.5" /> Reset
                         </button>
-                        {db && (
-                            <div className="flex items-center text-green-400 text-[10px] font-mono bg-green-950/20 px-3 py-1.5 rounded border border-green-900/30">
-                                <Save className="w-3 h-3 mr-1.5" /> AUTO-SAVE ON
-                            </div>
-                        )}
+                        <div className="flex items-center text-green-400 text-[10px] font-mono bg-green-950/20 px-3 py-1.5 rounded border border-green-900/30">
+                            <Save className="w-3 h-3 mr-1.5" /> AUTO-SAVED
+                        </div>
                     </div>
                 </div>
 
@@ -447,18 +478,18 @@ const App = () => {
                                 <div className="p-2 bg-yellow-500/10 rounded-lg text-yellow-400"><Flame className="w-5 h-5" /></div>
                                 <div>
                                     <h3 className="font-bold text-white">Shared Brain</h3>
-                                    <p className="text-xs text-slate-400">Общий блокнот команды (Real-time)</p>
+                                    <p className="text-xs text-slate-400">Блокнот (Автосохранение {db ? 'в Облако' : 'на Компьютер'})</p>
                                 </div>
                             </div>
                             <div className="text-xs text-slate-500 flex items-center gap-1">
-                                <Zap className="w-3 h-3" /> Auto-saving...
+                                <Zap className="w-3 h-3" /> Live Edit
                             </div>
                         </div>
                         <textarea
                             value={sharedNotes}
                             onChange={handleNotesChange}
                             onBlur={saveNotesToDb}
-                            placeholder="Пишите сюда ссылки, JSON схемы, идеи для промптов или просто мысли... (Видно всем участникам)"
+                            placeholder="Пишите сюда ссылки, JSON схемы, идеи для промптов или просто мысли..."
                             className="flex-1 bg-[#0F172A] text-slate-200 p-6 resize-none focus:outline-none font-mono text-sm leading-relaxed selection:bg-yellow-500/30"
                             spellCheck="false"
                         />
@@ -542,7 +573,7 @@ const App = () => {
                     </div>
                 )}
 
-                {/* --- FOOTER RESTORED --- */}
+                {/* --- FOOTER --- */}
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-12 pt-8 border-t border-slate-800/50">
                     <a href="https://github.com" target="_blank" rel="noreferrer" className="bg-slate-900/40 p-4 rounded-xl border border-slate-800 hover:border-blue-500/50 flex items-center justify-between transition-all group">
                         <div className="flex items-center gap-3">
@@ -554,7 +585,6 @@ const App = () => {
                         </div>
                         <ExternalLink className="w-4 h-4 text-slate-600 group-hover:text-blue-400" />
                     </a>
-
                     <a href="https://figma.com" target="_blank" rel="noreferrer" className="bg-slate-900/40 p-4 rounded-xl border border-slate-800 hover:border-pink-500/50 flex items-center justify-between transition-all group">
                         <div className="flex items-center gap-3">
                             <div className="p-2 bg-pink-500/10 rounded-lg text-pink-400 group-hover:scale-110 transition-transform"><Layout className="w-5 h-5" /></div>
@@ -565,7 +595,6 @@ const App = () => {
                         </div>
                         <ExternalLink className="w-4 h-4 text-slate-600 group-hover:text-pink-400" />
                     </a>
-
                     <a href="#" className="bg-slate-900/40 p-4 rounded-xl border border-slate-800 hover:border-green-500/50 flex items-center justify-between transition-all group">
                         <div className="flex items-center gap-3">
                             <div className="p-2 bg-green-500/10 rounded-lg text-green-400 group-hover:scale-110 transition-transform"><Terminal className="w-5 h-5" /></div>
@@ -577,11 +606,6 @@ const App = () => {
                         <ExternalLink className="w-4 h-4 text-slate-600 group-hover:text-green-400" />
                     </a>
                 </div>
-
-                <div className="text-center text-slate-700 text-xs font-mono py-4">
-                    ENGINEERED FOR FORTEBANK AI HACKATHON • 2025
-                </div>
-
             </div>
         </div>
     );
