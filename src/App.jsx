@@ -1,11 +1,36 @@
 import React, { useState, useEffect } from 'react';
 import {
     User, Brain, Layout, Server, Calendar, CheckCircle,
-    AlertCircle, Terminal, Share2, Clock, Trophy, Save,
-    ExternalLink, RefreshCw
+    AlertCircle, Terminal, Share2, Trophy, Save,
+    ExternalLink, RefreshCw, Wifi, WifiOff
 } from 'lucide-react';
 
-// --- КОНФИГУРАЦИЯ ДАТЫ И ДАННЫХ ---
+// --- ИМПОРТ FIREBASE ---
+import { initializeApp } from "firebase/app";
+import { getFirestore, doc, onSnapshot, setDoc } from "firebase/firestore";
+
+const firebaseConfig = {
+    apiKey: "AIzaSyAHqP6W8w4dnV7TuG0ryXIzCLGQstO89o0",
+    authDomain: "forte-dashboard.firebaseapp.com",
+    projectId: "forte-dashboard",
+    storageBucket: "forte-dashboard.firebasestorage.app",
+    messagingSenderId: "965435370678",
+    appId: "1:965435370678:web:eab582c1f56ded2c624a17",
+    measurementId: "G-1FLR1SPQX3"
+};
+
+// Инициализация Firebase (безопасная проверка, чтобы не падало при пустом конфиге)
+let db;
+try {
+    if (firebaseConfig.apiKey !== "ВСТАВЬ_СЮДА_API_KEY") {
+        const app = initializeApp(firebaseConfig);
+        db = getFirestore(app);
+    }
+} catch (e) {
+    console.error("Firebase init error:", e);
+}
+
+// --- КОНСТАНТЫ ---
 const HACKATHON_END_DATE = new Date('2025-11-28T12:00:00');
 
 const INITIAL_ROLES = [
@@ -96,7 +121,7 @@ const ProgressBar = ({ current, total, colorClass }) => {
 };
 
 const CountdownTimer = () => {
-    const [timeLeft, setTimeLeft] = useState({ days: 0, hours: 0, minutes: 0 });
+    const [timeLeft, setTimeLeft] = useState({ days: 0, hours: 0, minutes: 0, seconds: 0 });
 
     useEffect(() => {
         const timer = setInterval(() => {
@@ -108,28 +133,31 @@ const CountdownTimer = () => {
                     days: Math.floor(difference / (1000 * 60 * 60 * 24)),
                     hours: Math.floor((difference / (1000 * 60 * 60)) % 24),
                     minutes: Math.floor((difference / 1000 / 60) % 60),
+                    seconds: Math.floor((difference / 1000) % 60),
                 });
             }
         }, 1000);
         return () => clearInterval(timer);
     }, []);
 
+    const TimeBlock = ({ val, label }) => (
+        <div className="flex flex-col items-center w-10 md:w-12">
+            <span className="text-xl md:text-2xl font-mono font-bold text-red-400">{val}</span>
+            <span className="text-[9px] md:text-[10px] uppercase text-slate-500">{label}</span>
+        </div>
+    );
+
+    const Separator = () => <span className="text-slate-600 font-bold text-xl mb-3">:</span>;
+
     return (
-        <div className="flex space-x-3 text-center bg-slate-900 p-3 rounded-lg border border-slate-700 shadow-inner">
-            <div className="flex flex-col">
-                <span className="text-xl font-mono font-bold text-red-400">{timeLeft.days}</span>
-                <span className="text-[10px] uppercase text-slate-500">Дней</span>
-            </div>
-            <span className="text-slate-600 font-bold self-center">:</span>
-            <div className="flex flex-col">
-                <span className="text-xl font-mono font-bold text-red-400">{timeLeft.hours}</span>
-                <span className="text-[10px] uppercase text-slate-500">Часов</span>
-            </div>
-            <span className="text-slate-600 font-bold self-center">:</span>
-            <div className="flex flex-col">
-                <span className="text-xl font-mono font-bold text-red-400">{timeLeft.minutes}</span>
-                <span className="text-[10px] uppercase text-slate-500">Мин</span>
-            </div>
+        <div className="flex items-center justify-center space-x-1 md:space-x-2 bg-slate-900 p-2 md:p-3 rounded-lg border border-slate-700 shadow-inner">
+            <TimeBlock val={timeLeft.days} label="Дней" />
+            <Separator />
+            <TimeBlock val={timeLeft.hours} label="Часов" />
+            <Separator />
+            <TimeBlock val={timeLeft.minutes} label="Мин" />
+            <Separator />
+            <TimeBlock val={timeLeft.seconds} label="Сек" />
         </div>
     );
 };
@@ -140,26 +168,39 @@ const App = () => {
     const [activeTab, setActiveTab] = useState('roles');
     const [selectedDay, setSelectedDay] = useState(1);
     const [rolesData, setRolesData] = useState(INITIAL_ROLES);
+    const [isOnline, setIsOnline] = useState(false);
+    const [isConfigured, setIsConfigured] = useState(false);
 
-    // Загрузка из LocalStorage при старте
+    // Подключение к Firebase и синхронизация
     useEffect(() => {
-        const saved = localStorage.getItem('forteHackathonProgress');
-        if (saved) {
-            try {
-                setRolesData(JSON.parse(saved));
-            } catch (e) {
-                console.error("Ошибка чтения сейва", e);
-            }
+        if (!db) {
+            // Если конфига нет, читаем из localStorage (оффлайн режим)
+            const saved = localStorage.getItem('forteHackathonProgress');
+            if (saved) setRolesData(JSON.parse(saved));
+            return;
         }
+
+        setIsConfigured(true);
+        // Слушаем изменения в базе данных в реальном времени
+        const unsub = onSnapshot(doc(db, "hackathon", "progress"), (docSnapshot) => {
+            if (docSnapshot.exists()) {
+                setRolesData(docSnapshot.data().roles);
+                setIsOnline(true);
+            } else {
+                // Если документа нет, создаем его
+                setDoc(doc(db, "hackathon", "progress"), { roles: INITIAL_ROLES });
+            }
+        }, (error) => {
+            console.error("Sync error:", error);
+            setIsOnline(false);
+        });
+
+        return () => unsub();
     }, []);
 
-    // Сохранение при каждом изменении
-    useEffect(() => {
-        localStorage.setItem('forteHackathonProgress', JSON.stringify(rolesData));
-    }, [rolesData]);
-
-    const toggleTask = (roleId, taskId) => {
-        setRolesData(prev => prev.map(role => {
+    const toggleTask = async (roleId, taskId) => {
+        // Оптимистичное обновление (сразу меняем UI)
+        const newData = rolesData.map(role => {
             if (role.id !== roleId) return role;
             return {
                 ...role,
@@ -167,13 +208,20 @@ const App = () => {
                     task.id === taskId ? { ...task, completed: !task.completed } : task
                 )
             };
-        }));
-    };
+        });
+        setRolesData(newData);
 
-    const resetProgress = () => {
-        if(confirm("Сбросить весь прогресс? Это нельзя отменить.")) {
-            setRolesData(INITIAL_ROLES);
-            localStorage.removeItem('forteHackathonProgress');
+        // Если Firebase подключен - отправляем в облако
+        if (db) {
+            try {
+                await setDoc(doc(db, "hackathon", "progress"), { roles: newData }, { merge: true });
+            } catch (e) {
+                console.error("Error writing document: ", e);
+                alert("Ошибка сохранения в облако! Проверьте консоль.");
+            }
+        } else {
+            // Иначе сохраняем локально
+            localStorage.setItem('forteHackathonProgress', JSON.stringify(newData));
         }
     };
 
@@ -186,7 +234,17 @@ const App = () => {
         <div className="min-h-screen bg-slate-950 text-gray-100 font-sans p-4 md:p-8 pb-20">
             <div className="max-w-7xl mx-auto space-y-8">
 
-                {/* Top Bar: Title & Global Status */}
+                {/* Warning if not configured */}
+                {!isConfigured && (
+                    <div className="bg-orange-900/20 border border-orange-700/50 p-4 rounded-lg text-orange-200 text-sm flex items-center justify-between">
+            <span className="flex items-center">
+              <AlertCircle className="w-5 h-5 mr-2" />
+              Режим LocalStorage (только на этом устройстве). Чтобы синхронизировать с друзьями, добавь ключи Firebase в App.jsx.
+            </span>
+                    </div>
+                )}
+
+                {/* Top Bar */}
                 <div className="flex flex-col md:flex-row justify-between items-center gap-6 bg-slate-900/50 p-6 rounded-2xl border border-slate-800 backdrop-blur-sm">
                     <div>
                         <h1 className="text-3xl md:text-4xl font-extrabold bg-gradient-to-r from-blue-400 via-purple-400 to-pink-400 text-transparent bg-clip-text">
@@ -194,32 +252,29 @@ const App = () => {
                         </h1>
                         <p className="text-slate-400 mt-1 flex items-center gap-2">
                             <span className="bg-blue-900/50 text-blue-300 text-xs px-2 py-0.5 rounded border border-blue-800">Task #4</span>
-                            <span className="text-sm">AI Business Analyst Strategy</span>
+                            {isConfigured && (
+                                <span className={`flex items-center text-xs px-2 py-0.5 rounded border ${isOnline ? 'bg-green-900/30 text-green-400 border-green-800' : 'bg-red-900/30 text-red-400 border-red-800'}`}>
+                  {isOnline ? <Wifi className="w-3 h-3 mr-1" /> : <WifiOff className="w-3 h-3 mr-1" />}
+                                    {isOnline ? 'Online Sync' : 'Connecting...'}
+                </span>
+                            )}
                         </p>
                     </div>
 
-                    <div className="flex items-center gap-6">
-                        <div className="hidden md:block text-right">
-                            <div className="text-xs uppercase text-slate-500 font-bold mb-1">До дедлайна</div>
-                            <CountdownTimer />
-                        </div>
+                    <div className="flex flex-col md:items-end gap-4 w-full md:w-auto">
+                        <CountdownTimer />
 
-                        <div className="bg-slate-800 p-4 rounded-xl border border-slate-700 w-full md:w-48 relative overflow-hidden">
+                        <div className="bg-slate-800 p-3 rounded-xl border border-slate-700 w-full md:w-64 relative overflow-hidden">
                             <div className="flex justify-between text-sm font-bold mb-2 relative z-10">
                                 <span className="text-slate-300">Общий прогресс</span>
                                 <span className={totalPercent === 100 ? "text-green-400" : "text-blue-400"}>{totalPercent}%</span>
                             </div>
                             <ProgressBar current={completedTasks} total={totalTasks} colorClass="bg-gradient-to-r from-blue-500 to-purple-500" />
-                            {totalPercent === 100 && (
-                                <div className="absolute inset-0 flex items-center justify-center bg-black/60 z-20 text-yellow-400 font-bold animate-pulse">
-                                    <Trophy className="w-5 h-5 mr-2" /> WE ARE READY!
-                                </div>
-                            )}
                         </div>
                     </div>
                 </div>
 
-                {/* Navigation & Actions */}
+                {/* Navigation */}
                 <div className="flex flex-wrap justify-between items-center border-b border-slate-800 pb-4 gap-4">
                     <div className="flex space-x-2 bg-slate-900/50 p-1 rounded-full">
                         <button
@@ -227,33 +282,19 @@ const App = () => {
                             className={`px-5 py-2 rounded-full text-sm font-bold transition-all flex items-center ${activeTab === 'roles' ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/50' : 'text-slate-400 hover:text-white hover:bg-slate-800'}`}
                         >
                             <User className="w-4 h-4 mr-2" />
-                            Роли & Задачи
+                            Роли
                         </button>
                         <button
                             onClick={() => setActiveTab('timeline')}
                             className={`px-5 py-2 rounded-full text-sm font-bold transition-all flex items-center ${activeTab === 'timeline' ? 'bg-purple-600 text-white shadow-lg shadow-purple-900/50' : 'text-slate-400 hover:text-white hover:bg-slate-800'}`}
                         >
                             <Calendar className="w-4 h-4 mr-2" />
-                            Спринт (Дни)
+                            Спринт
                         </button>
-                    </div>
-
-                    <div className="flex items-center gap-3">
-                        <button
-                            onClick={resetProgress}
-                            className="text-xs text-slate-600 hover:text-red-400 flex items-center transition-colors px-3 py-2"
-                            title="Сбросить прогресс"
-                        >
-                            <RefreshCw className="w-3 h-3 mr-1" /> Reset
-                        </button>
-                        <div className="flex items-center text-green-500 text-xs bg-green-950/30 px-3 py-1.5 rounded-full border border-green-900/50">
-                            <Save className="w-3 h-3 mr-1.5" />
-                            Auto-save on
-                        </div>
                     </div>
                 </div>
 
-                {/* --- ROLES VIEW --- */}
+                {/* Roles View */}
                 {activeTab === 'roles' && (
                     <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                         {rolesData.map((role) => {
@@ -263,7 +304,6 @@ const App = () => {
 
                             return (
                                 <div key={role.id} className={`bg-slate-900 rounded-xl overflow-hidden border-t-4 ${role.color} shadow-xl flex flex-col relative group`}>
-                                    {/* Header */}
                                     <div className={`p-6 bg-gradient-to-b ${role.bg}`}>
                                         <div className="flex items-center justify-between mb-4">
                                             <div className="p-3 bg-slate-950 rounded-lg border border-slate-800 shadow-lg">
@@ -276,22 +316,9 @@ const App = () => {
                                         </div>
                                         <h3 className="text-xl font-bold text-white mb-1">{role.title}</h3>
                                         <p className="text-xs text-slate-400 font-mono">{role.subtitle}</p>
-
                                         <ProgressBar current={roleCompleted} total={roleTotal} colorClass={isDone ? 'bg-green-500' : 'bg-blue-500'} />
                                     </div>
 
-                                    {/* Tech Stack */}
-                                    <div className="px-6 py-3 border-b border-slate-800 bg-slate-900/50">
-                                        <div className="flex flex-wrap gap-2">
-                                            {role.tech.map((t, i) => (
-                                                <span key={i} className="px-2 py-1 bg-slate-800 rounded text-[10px] text-slate-300 border border-slate-700">
-                            {t}
-                          </span>
-                                            ))}
-                                        </div>
-                                    </div>
-
-                                    {/* Tasks List */}
                                     <div className="p-4 space-y-2 flex-1 bg-slate-900">
                                         {role.tasks.map((task) => (
                                             <div
@@ -328,90 +355,55 @@ const App = () => {
                     </div>
                 )}
 
-                {/* --- TIMELINE VIEW --- */}
+                {/* Timeline View */}
                 {activeTab === 'timeline' && (
                     <div className="bg-slate-900 rounded-xl border border-slate-800 overflow-hidden">
                         <div className="flex overflow-x-auto border-b border-slate-800 scrollbar-hide">
-                            {SPRINT_PLAN.map((day) => {
-                                // Check if all tasks for this day are done across all roles
-                                const dayTasks = rolesData.flatMap(r => r.tasks.filter(t => t.day === day.day));
-                                const isDayComplete = dayTasks.length > 0 && dayTasks.every(t => t.completed);
-
-                                return (
-                                    <button
-                                        key={day.day}
-                                        onClick={() => setSelectedDay(day.day)}
-                                        className={`
-                      flex-1 min-w-[120px] p-4 text-center border-r border-slate-800 transition-colors relative
-                      ${selectedDay === day.day ? 'bg-blue-900/20' : 'hover:bg-slate-800'}
-                    `}
-                                    >
-                                        {isDayComplete && <div className="absolute top-2 right-2 w-2 h-2 bg-green-500 rounded-full shadow-[0_0_8px_rgba(34,197,94,0.6)]"></div>}
-                                        <div className={`text-xs font-bold uppercase mb-1 ${selectedDay === day.day ? 'text-blue-400' : 'text-slate-500'}`}>
-                                            Day {day.day}
-                                        </div>
-                                        <div className={`text-sm font-medium ${selectedDay === day.day ? 'text-white' : 'text-slate-400'}`}>
-                                            {day.theme}
-                                        </div>
-                                    </button>
-                                )
-                            })}
+                            {SPRINT_PLAN.map((day) => (
+                                <button
+                                    key={day.day}
+                                    onClick={() => setSelectedDay(day.day)}
+                                    className={`
+                    flex-1 min-w-[120px] p-4 text-center border-r border-slate-800 transition-colors relative
+                    ${selectedDay === day.day ? 'bg-blue-900/20' : 'hover:bg-slate-800'}
+                  `}
+                                >
+                                    <div className={`text-xs font-bold uppercase mb-1 ${selectedDay === day.day ? 'text-blue-400' : 'text-slate-500'}`}>
+                                        Day {day.day}
+                                    </div>
+                                    <div className={`text-sm font-medium ${selectedDay === day.day ? 'text-white' : 'text-slate-400'}`}>
+                                        {day.theme}
+                                    </div>
+                                </button>
+                            ))}
                         </div>
 
                         <div className="p-6 md:p-8">
-                            <div className="flex flex-col md:flex-row md:items-center justify-between mb-8 gap-4">
-                                <div>
-                                    <h2 className="text-2xl font-bold text-white flex items-center gap-3">
-                    <span className="flex items-center justify-center w-10 h-10 rounded-full bg-blue-600 text-white text-lg font-bold shadow-lg shadow-blue-900/50">
-                      {selectedDay}
-                    </span>
-                                        <span>{SPRINT_PLAN[selectedDay - 1].theme}</span>
-                                    </h2>
-                                    <p className="text-slate-400 mt-2 ml-12">
-                                        Цель: <span className="text-blue-300">{SPRINT_PLAN[selectedDay - 1].goal}</span>
-                                    </p>
-                                </div>
-                            </div>
-
+                            <h2 className="text-2xl font-bold text-white mb-6">
+                                <span className="text-blue-400">Day {selectedDay}:</span> {SPRINT_PLAN[selectedDay - 1].theme}
+                            </h2>
                             <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                                 {rolesData.map((role) => {
                                     const dailyTasks = role.tasks.filter(t => t.day === selectedDay);
-
-                                    return (
-                                        <div key={role.id} className="bg-slate-950/50 rounded-xl p-5 border border-slate-800 hover:border-slate-700 transition-all">
+                                    return dailyTasks.length > 0 && (
+                                        <div key={role.id} className="bg-slate-950/50 rounded-xl p-5 border border-slate-800">
                                             <div className="flex items-center mb-4 pb-3 border-b border-slate-800">
-                                                <IconMap name={role.iconName} className={`w-5 h-5 mr-3 ${role.id === 1 ? 'text-purple-400' : role.id === 2 ? 'text-blue-400' : 'text-green-400'}`} />
+                                                <IconMap name={role.iconName} className="w-5 h-5 mr-3 text-slate-400" />
                                                 <span className="font-bold text-slate-200">{role.title}</span>
                                             </div>
-
                                             <div className="space-y-3">
-                                                {dailyTasks.length > 0 ? dailyTasks.map(task => (
+                                                {dailyTasks.map(task => (
                                                     <div
                                                         key={task.id}
                                                         onClick={() => toggleTask(role.id, task.id)}
-                                                        className={`
-                              p-3 rounded-lg border cursor-pointer flex items-start gap-3 transition-all
-                              ${task.completed
-                                                            ? 'bg-green-900/10 border-green-900/30'
-                                                            : 'bg-slate-800 border-slate-700 hover:bg-slate-800/80'
-                                                        }
-                            `}
+                                                        className={`p-3 rounded-lg border cursor-pointer flex items-start gap-3 ${task.completed ? 'opacity-50' : ''}`}
                                                     >
-                                                        <div className={`
-                                mt-0.5 w-5 h-5 rounded-full border flex items-center justify-center shrink-0
-                                ${task.completed ? 'bg-green-500 border-green-500 text-slate-900' : 'border-slate-600 bg-slate-900'}
-                             `}>
-                                                            {task.completed && <CheckCircle className="w-3 h-3" />}
+                                                        <div className={`w-5 h-5 rounded-full border flex items-center justify-center shrink-0 ${task.completed ? 'bg-green-500 border-green-500' : 'border-slate-600'}`}>
+                                                            {task.completed && <CheckCircle className="w-3 h-3 text-slate-900" />}
                                                         </div>
-                                                        <span className={`text-sm ${task.completed ? 'text-slate-500 line-through' : 'text-slate-200'}`}>
-                               {task.text}
-                             </span>
+                                                        <span className="text-sm text-slate-200">{task.text}</span>
                                                     </div>
-                                                )) : (
-                                                    <div className="text-center py-8 text-slate-600 text-sm italic border border-dashed border-slate-800 rounded-lg">
-                                                        Нет задач на этот день.<br/>Помогите коллегам!
-                                                    </div>
-                                                )}
+                                                ))}
                                             </div>
                                         </div>
                                     )
@@ -421,38 +413,8 @@ const App = () => {
                     </div>
                 )}
 
-                {/* Footer Resources */}
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-8 pt-8 border-t border-slate-800">
-                    <div className="bg-slate-900 p-4 rounded-lg border border-slate-800 flex items-center justify-between hover:border-blue-500/50 cursor-pointer transition-colors group">
-                        <div className="flex items-center gap-3">
-                            <div className="p-2 bg-blue-500/10 rounded text-blue-400"><Share2 className="w-5 h-5" /></div>
-                            <div>
-                                <div className="text-sm font-bold text-slate-200 group-hover:text-white">GitHub Repo</div>
-                                <div className="text-xs text-slate-500">Код проекта</div>
-                            </div>
-                        </div>
-                        <ExternalLink className="w-4 h-4 text-slate-600 group-hover:text-blue-400" />
-                    </div>
-                    <div className="bg-slate-900 p-4 rounded-lg border border-slate-800 flex items-center justify-between hover:border-orange-500/50 cursor-pointer transition-colors group">
-                        <div className="flex items-center gap-3">
-                            <div className="p-2 bg-orange-500/10 rounded text-orange-400"><Layout className="w-5 h-5" /></div>
-                            <div>
-                                <div className="text-sm font-bold text-slate-200 group-hover:text-white">Figma / Miro</div>
-                                <div className="text-xs text-slate-500">Дизайн и схемы</div>
-                            </div>
-                        </div>
-                        <ExternalLink className="w-4 h-4 text-slate-600 group-hover:text-orange-400" />
-                    </div>
-                    <div className="bg-slate-900 p-4 rounded-lg border border-slate-800 flex items-center justify-between hover:border-green-500/50 cursor-pointer transition-colors group">
-                        <div className="flex items-center gap-3">
-                            <div className="p-2 bg-green-500/10 rounded text-green-400"><Terminal className="w-5 h-5" /></div>
-                            <div>
-                                <div className="text-sm font-bold text-slate-200 group-hover:text-white">API Docs</div>
-                                <div className="text-xs text-slate-500">Swagger / Postman</div>
-                            </div>
-                        </div>
-                        <ExternalLink className="w-4 h-4 text-slate-600 group-hover:text-green-400" />
-                    </div>
+                <div className="text-center text-slate-600 text-xs pt-8">
+                    ForteBank Hackathon Sync v2.0
                 </div>
 
             </div>
